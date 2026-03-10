@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>Wake Up Tracker</title>
+
+  <!-- PWA -->
+  <meta name="theme-color" content="#1a1a3e"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="Wake Up"/>
+  <link rel="manifest" href="manifest.json"/>
+
+  <!-- Apple touch icons -->
+  <link rel="apple-touch-icon" href="icon-192.png"/>
+  <link rel="icon" type="image/png" href="icon-192.png"/>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #root { height: 100%; }
+    body { background: #1a1a3e; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <!-- Babel for JSX -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAIceqMXYNY5EH_3vTmIbogjb6wJ2CCBxQ",
+      authDomain: "speakup-27de0.firebaseapp.com",
+      projectId: "speakup-27de0",
+      storageBucket: "speakup-27de0.firebasestorage.app",
+      messagingSenderId: "811108429557",
+      appId: "1:811108429557:web:1ad8de2151de43b8f8dfbc",
+    };
+    const fbApp = initializeApp(firebaseConfig);
+    const db    = getFirestore(fbApp);
+
+    window.__firebase = {
+      db,
+      collection, addDoc, getDocs, deleteDoc, doc, query, orderBy,
+      COLLECTION: "wakeup_logs",
+    };
+    window.dispatchEvent(new Event("firebaseReady"));
+  </script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const SUN_RAYS = Array.from({ length: 12 }, (_, i) => i);
+
+    const fmt  = (d) => new Date(d).toLocaleTimeString("en-US",{ hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:true });
+    const fmtD = (d) => new Date(d).toLocaleDateString("en-US",{ weekday:"long", year:"numeric", month:"long", day:"numeric" });
+    const fmtS = (d) => new Date(d).toLocaleDateString("en-US",{ weekday:"short", month:"short", day:"numeric", year:"numeric" });
+
+    function cat(h) {
+      if (h < 5)  return { label:"Late Night 🌙",    color:"#1a1a3e" };
+      if (h < 8)  return { label:"Early Bird 🌅",    color:"#f97316" };
+      if (h < 10) return { label:"Morning ☀️",       color:"#eab308" };
+      if (h < 12) return { label:"Late Morning 🌤️", color:"#84cc16" };
+      if (h < 15) return { label:"Afternoon 🌞",     color:"#06b6d4" };
+      return               { label:"Evening 🌆",     color:"#8b5cf6" };
+    }
+    function sky(h) {
+      if (h < 5)  return ["#0a0a1a","#1a1a3e","#1a1a3e"];
+      if (h < 7)  return ["#1a1a3e","#7c3aed","#f97316"];
+      if (h < 9)  return ["#fed7aa","#fbbf24","#fef3c7"];
+      if (h < 17) return ["#bfdbfe","#60a5fa","#e0f2fe"];
+      if (h < 19) return ["#fed7aa","#f97316","#7c3aed"];
+      return               ["#1e1b4b","#312e81","#1a1a3e"];
+    }
+
+    function App() {
+      const [logs, setLogs]         = useState([]);
+      const [loading, setLoading]   = useState(true);
+      const [saving, setSaving]     = useState(false);
+      const [toasted, setToasted]   = useState(false);
+      const [now, setNow]           = useState(new Date());
+      const [pulse, setPulse]       = useState(false);
+      const [showHist, setShowHist] = useState(false);
+      const [error, setError]       = useState(null);
+      const [fbReady, setFbReady]   = useState(!!window.__firebase);
+
+      useEffect(() => {
+        if (!fbReady) {
+          const h = () => setFbReady(true);
+          window.addEventListener("firebaseReady", h);
+          return () => window.removeEventListener("firebaseReady", h);
+        }
+      }, [fbReady]);
+
+      useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return ()=>clearInterval(t); }, []);
+
+      useEffect(() => {
+        if (!fbReady) return;
+        const { db, collection, query, orderBy, getDocs, COLLECTION } = window.__firebase;
+        (async () => {
+          try {
+            const snap = await getDocs(query(collection(db, COLLECTION), orderBy("timestamp","desc")));
+            setLogs(snap.docs.map(d => ({ id:d.id, ...d.data() })));
+          } catch(e) { setError("Load failed: "+e.message); }
+          finally { setLoading(false); }
+        })();
+      }, [fbReady]);
+
+      const todayStr = now.toDateString();
+      const alreadyDone = logs.some(l => new Date(l.timestamp).toDateString() === todayStr);
+
+      async function wakeUp() {
+        if (alreadyDone || saving || !fbReady) return;
+        setPulse(true); setSaving(true);
+        const { db, collection, addDoc, COLLECTION } = window.__firebase;
+        try {
+          const entry = { timestamp: now.toISOString() };
+          const ref = await addDoc(collection(db, COLLECTION), entry);
+          setLogs(p => [{ id:ref.id, ...entry }, ...p]);
+          setToasted(true);
+          setTimeout(() => { setPulse(false); setToasted(false); }, 3000);
+        } catch(e) { setError("Save failed: "+e.message); setPulse(false); }
+        finally { setSaving(false); }
+      }
+
+      async function del(id) {
+        const { db, doc, deleteDoc, COLLECTION } = window.__firebase;
+        try {
+          await deleteDoc(doc(db, COLLECTION, id));
+          setLogs(p => p.filter(l => l.id !== id));
+        } catch(e) { setError("Delete failed: "+e.message); }
+      }
+
+      const h = now.getHours();
+      const c = cat(h);
+      const [c1,c2,c3] = sky(h);
+
+      const avgH = logs.length
+        ? Math.round(logs.reduce((a,l)=>a+new Date(l.timestamp).getHours(),0)/logs.length)
+        : null;
+
+      const streak = (() => {
+        if (!logs.length) return 0;
+        let n=0; const today=new Date(); today.setHours(0,0,0,0);
+        for(let i=0;i<60;i++){
+          const d=new Date(today); d.setDate(d.getDate()-i);
+          if(logs.some(l=>new Date(l.timestamp).toDateString()===d.toDateString())) n++;
+          else if(i>0) break;
+        }
+        return n;
+      })();
+
+      return (
+        <div style={{
+          minHeight:"100vh", minHeight:"100dvh",
+          background:`linear-gradient(180deg,${c1} 0%,${c2} 50%,${c3} 100%)`,
+          fontFamily:"Georgia,serif", display:"flex", flexDirection:"column",
+          alignItems:"center", padding:"env(safe-area-inset-top,24px) 16px 24px",
+          transition:"background 2s ease", position:"relative", overflow:"hidden",
+        }}>
+          <style>{`
+            @keyframes twinkle   {0%,100%{opacity:.2}50%{opacity:1}}
+            @keyframes sunSpin   {from{transform:rotate(0)}to{transform:rotate(360deg)}}
+            @keyframes ripple    {0%{transform:scale(1);opacity:.6}100%{transform:scale(2.5);opacity:0}}
+            @keyframes bounceIn  {0%{transform:scale(.3);opacity:0}60%{transform:scale(1.1)}100%{transform:scale(1);opacity:1}}
+            @keyframes float     {0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+            @keyframes fadeSlide {from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+            @keyframes spin      {from{transform:rotate(0)}to{transform:rotate(360deg)}}
+          `}</style>
+
+          {h<6 && Array.from({length:40}).map((_,i)=>(
+            <div key={i} style={{
+              position:"fixed", borderRadius:"50%", background:"white", pointerEvents:"none",
+              width:(Math.random()*2+1)+"px", height:(Math.random()*2+1)+"px",
+              left:Math.random()*100+"%", top:Math.random()*60+"%",
+              opacity:Math.random()*.8+.2,
+              animation:`twinkle ${Math.random()*3+2}s ease-in-out infinite`,
+            }}/>
+          ))}
+
+          {error && (
+            <div style={{
+              background:"rgba(239,68,68,.2)",border:"1px solid rgba(239,68,68,.5)",
+              color:"#fca5a5",borderRadius:12,padding:"10px 18px",
+              marginBottom:16,fontSize:13,backdropFilter:"blur(8px)",
+            }}>
+              ⚠️ {error}
+              <button onClick={()=>setError(null)} style={{background:"none",border:"none",color:"#fca5a5",cursor:"pointer",marginLeft:8}}>✕</button>
+            </div>
+          )}
+
+          {/* Sun / Moon */}
+          <div style={{position:"relative",width:80,height:80,marginBottom:8,animation:"float 4s ease-in-out infinite"}}>
+            {h>=6&&h<20 ? (
+              <>
+                <div style={{position:"absolute",inset:0,animation:"sunSpin 20s linear infinite"}}>
+                  {SUN_RAYS.map((_,i)=>(
+                    <div key={i} style={{
+                      position:"absolute",left:"50%",top:"50%",width:3,height:18,
+                      background:"#fbbf24",borderRadius:2,transformOrigin:"50% 50px",
+                      transform:`rotate(${i*30}deg) translateX(-50%)`,opacity:.7,
+                    }}/>
+                  ))}
+                </div>
+                <div style={{position:"absolute",inset:12,borderRadius:"50%",background:"radial-gradient(circle at 35% 35%,#fef08a,#f59e0b)",boxShadow:"0 0 30px #fbbf24aa"}}/>
+              </>
+            ):(
+              <div style={{position:"absolute",inset:8,borderRadius:"50%",background:"radial-gradient(circle at 35% 35%,#e2e8f0,#94a3b8)",boxShadow:"0 0 20px #e2e8f0aa"}}/>
+            )}
+          </div>
+
+          <div style={{color:"white",fontSize:"clamp(38px,11vw,68px)",fontWeight:"bold",letterSpacing:2,textShadow:"0 2px 20px rgba(0,0,0,.4)",lineHeight:1,marginBottom:4}}>
+            {fmt(now)}
+          </div>
+          <div style={{color:"rgba(255,255,255,.8)",fontSize:"clamp(13px,3.5vw,17px)",marginBottom:6,letterSpacing:1,textAlign:"center"}}>
+            {fmtD(now)}
+          </div>
+          <div style={{background:c.color+"88",color:"white",borderRadius:20,padding:"4px 14px",fontSize:13,marginBottom:28,backdropFilter:"blur(4px)",border:"1px solid rgba(255,255,255,.2)"}}>
+            {c.label}
+          </div>
+
+          {/* Big Button */}
+          <div style={{position:"relative",marginBottom:32}}>
+            {pulse&&<>
+              <div style={{position:"absolute",inset:0,borderRadius:"50%",background:"#fbbf24",animation:"ripple 1s ease-out forwards"}}/>
+              <div style={{position:"absolute",inset:0,borderRadius:"50%",background:"#fbbf24",animation:"ripple 1.4s ease-out forwards"}}/>
+            </>}
+            <button onClick={wakeUp} disabled={alreadyDone||saving||loading||!fbReady} style={{
+              width:170,height:170,borderRadius:"50%",border:"none",
+              cursor:(alreadyDone||saving||loading||!fbReady)?"default":"pointer",
+              background:alreadyDone
+                ?"radial-gradient(circle at 35% 35%,#86efac,#22c55e)"
+                :"radial-gradient(circle at 35% 35%,#fef08a,#f59e0b)",
+              boxShadow:alreadyDone
+                ?"0 0 40px #22c55e88,0 8px 30px rgba(0,0,0,.3)"
+                :"0 0 40px #fbbf2488,0 8px 30px rgba(0,0,0,.3)",
+              transform:pulse?"scale(.95)":"scale(1)",transition:"all .2s ease",
+              display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+              animation:!alreadyDone?"float 3s ease-in-out infinite":"none",
+              WebkitTapHighlightColor:"transparent",
+            }}>
+              {loading||saving ? (
+                <div style={{width:36,height:36,border:"3px solid #78350f",borderTopColor:"transparent",borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+              ):(
+                <>
+                  <div style={{fontSize:52,lineHeight:1}}>{alreadyDone?"✅":"☀️"}</div>
+                  <div style={{color:alreadyDone?"#14532d":"#78350f",fontWeight:"bold",fontSize:14,marginTop:8,textAlign:"center",lineHeight:1.4}}>
+                    {alreadyDone?"Logged\nToday!":"I'm\nAwake!"}
+                  </div>
+                </>
+              )}
+            </button>
+          </div>
+
+          {toasted&&(
+            <div style={{background:"rgba(255,255,255,.15)",backdropFilter:"blur(10px)",border:"1px solid rgba(255,255,255,.3)",borderRadius:16,padding:"12px 24px",color:"white",fontWeight:"bold",fontSize:16,marginBottom:24,animation:"bounceIn .5s ease-out",textAlign:"center"}}>
+              🌟 Good morning! Saved to Firebase!
+            </div>
+          )}
+
+          {/* Stats */}
+          <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap",justifyContent:"center"}}>
+            {[
+              {label:"Total Days", value:loading?"…":logs.length,   icon:"📅"},
+              {label:"Streak",     value:loading?"…":`${streak}d`,  icon:"🔥"},
+              {label:"Avg Wake",   value:loading?"…":avgH!=null?`${avgH>12?avgH-12:avgH||12}${avgH>=12?"pm":"am"}`:"—", icon:"⏰"},
+            ].map(s=>(
+              <div key={s.label} style={{background:"rgba(255,255,255,.12)",backdropFilter:"blur(8px)",border:"1px solid rgba(255,255,255,.2)",borderRadius:14,padding:"12px 20px",textAlign:"center",minWidth:90}}>
+                <div style={{fontSize:22}}>{s.icon}</div>
+                <div style={{color:"white",fontWeight:"bold",fontSize:20}}>{s.value}</div>
+                <div style={{color:"rgba(255,255,255,.6)",fontSize:11}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{background:"rgba(255,152,50,.15)",border:"1px solid rgba(255,152,50,.3)",borderRadius:10,padding:"5px 14px",color:"rgba(255,200,100,.8)",fontSize:11,marginBottom:16,letterSpacing:.5}}>
+            🔥 Synced with Firebase
+          </div>
+
+          {logs.length>0&&(
+            <button onClick={()=>setShowHist(!showHist)} style={{background:"rgba(255,255,255,.15)",backdropFilter:"blur(8px)",border:"1px solid rgba(255,255,255,.3)",borderRadius:12,color:"white",padding:"10px 24px",cursor:"pointer",fontSize:14,marginBottom:16,fontFamily:"Georgia,serif",WebkitTapHighlightColor:"transparent"}}>
+              {showHist?`▲ Hide History`:`▼ Show History (${logs.length})`}
+            </button>
+          )}
+
+          {showHist&&(
+            <div style={{width:"100%",maxWidth:420,animation:"fadeSlide .3s ease-out"}}>
+              {logs.map(log=>{
+                const d=new Date(log.timestamp), hc=cat(d.getHours());
+                return (
+                  <div key={log.id} style={{background:"rgba(255,255,255,.1)",backdropFilter:"blur(8px)",border:"1px solid rgba(255,255,255,.2)",borderRadius:14,padding:"12px 16px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:12}}>
+                      <div style={{width:40,height:40,borderRadius:"50%",background:hc.color+"66",border:`2px solid ${hc.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>
+                        {d.getHours()>=6&&d.getHours()<20?"☀️":"🌙"}
+                      </div>
+                      <div>
+                        <div style={{color:"white",fontWeight:"bold",fontSize:15}}>{fmtS(log.timestamp)}</div>
+                        <div style={{color:"rgba(255,255,255,.7)",fontSize:13}}>{fmt(d)} · {hc.label}</div>
+                      </div>
+                    </div>
+                    <button onClick={()=>del(log.id)} style={{background:"rgba(255,100,100,.2)",border:"1px solid rgba(255,100,100,.3)",borderRadius:8,color:"#fca5a5",cursor:"pointer",padding:"4px 10px",fontSize:12,fontFamily:"Georgia,serif"}}>✕</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {!loading&&logs.length===0&&(
+            <div style={{color:"rgba(255,255,255,.5)",fontSize:14,textAlign:"center",marginTop:8}}>
+              Press the sun button when you wake up!<br/>Your history will be saved to Firebase.
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    window.addEventListener("firebaseReady", () => {
+      ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+    });
+    // If firebase already loaded before this script runs
+    if (window.__firebase) {
+      ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+    }
+  </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+  </script>
+</body>
+</html>
